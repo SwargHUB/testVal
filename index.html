@@ -148,7 +148,11 @@
 
         if (!reply.ok) {
           clearOutput();
-          showOutput("invalid_input", "Сервер не принял заявку: текст пустой или передан в неверном формате.");
+          if (reply.status === 400) {
+            showOutput("invalid_input", "Сервер не принял заявку: текст пустой или передан в неверном формате.");
+          } else {
+            showManualReview(`Сервер вернул ошибку ${reply.status}.`, text);
+          }
           return;
         }
 
