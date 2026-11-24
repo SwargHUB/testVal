@@ -9,27 +9,186 @@
     textarea { box-sizing: border-box; display: block; width: 100%; margin: .5rem 0; padding: .5rem; font: inherit; }
     button { padding: .4rem .8rem; font: inherit; }
     pre { white-space: pre-wrap; }
+    .hint { color: #555; font-size: .9rem; }
+    .output { border: 1px solid #d0d0d0; border-radius: .4rem; margin-top: 1rem; padding: .75rem 1rem; }
+    .output[data-state="ready"] { border-color: #2e7d32; }
+    .output[data-state="manual_review"] { border-color: #b26a00; background: #fff8e6; }
+    .output[data-state="invalid_input"], .output[data-state="error"] { border-color: #b3261e; background: #fdf1f0; }
+    .status { margin: 0 0 .5rem; font-weight: 600; }
+    .output[data-state="ready"] .status { color: #2e7d32; }
+    .output[data-state="manual_review"] .status { color: #8a4b00; }
+    .output[data-state="invalid_input"] .status, .output[data-state="error"] .status { color: #b3261e; }
+    .field { margin: .5rem 0 0; }
+    .field-label { display: block; font-size: .85rem; text-transform: uppercase; letter-spacing: .03em; color: #555; }
+    .topic-badge { display: inline-block; padding: .1rem .5rem; border: 1px solid #2e7d32; border-radius: 1rem; }
+    #draft { margin: .25rem 0 0; padding: .5rem; background: #f6f6f6; border-radius: .3rem; }
+    #request-copy { margin: .25rem 0 0; padding: .5rem; background: #fff; border: 1px dashed #c9b28a; border-radius: .3rem; }
+    .actions { margin-top: .5rem; }
+    .actions button { margin-right: .5rem; }
+    button[disabled] { opacity: .6; cursor: progress; }
   </style>
 </head>
 <body>
   <h1>Входящие заявки</h1>
-  <form>
+  <p class="hint">Введите текст заявки клиента. Система определит тему и подготовит черновик ответа — отправлять его клиенту нужно вручную.</p>
+  <form id="triage-form">
     <label for="message">Текст заявки</label>
-    <textarea id="message" rows="4"></textarea>
-    <button type="submit">Разобрать заявку</button>
+    <textarea id="message" rows="4" placeholder="Например: клиент спрашивает про стоимость доставки"></textarea>
+    <button id="submit" type="submit">Разобрать заявку</button>
   </form>
-  <pre id="result" aria-live="polite"></pre>
+  <section id="output" class="output" data-state="idle" aria-live="polite" hidden>
+    <p id="status" class="status"></p>
+    <div id="topic-field" class="field" hidden>
+      <span class="field-label">Тема</span>
+      <span id="topic" class="topic-badge"></span>
+    </div>
+    <div id="draft-field" class="field" hidden>
+      <span class="field-label">Черновик ответа</span>
+      <pre id="draft"></pre>
+      <div class="actions">
+        <button id="copy" type="button">Скопировать черновик</button>
+      </div>
+    </div>
+    <div id="request-field" class="field" hidden>
+      <span class="field-label">Исходная заявка</span>
+      <pre id="request-copy"></pre>
+    </div>
+  </section>
   <script type="module">
-    const form = document.querySelector("form");
-    const result = document.querySelector("#result");
+    const form = document.querySelector("#triage-form");
+    const textarea = document.querySelector("#message");
+    const submitButton = document.querySelector("#submit");
+    const output = document.querySelector("#output");
+    const statusLine = document.querySelector("#status");
+    const topicField = document.querySelector("#topic-field");
+    const topicValue = document.querySelector("#topic");
+    const draftField = document.querySelector("#draft-field");
+    const draftValue = document.querySelector("#draft");
+    const copyButton = document.querySelector("#copy");
+    const requestField = document.querySelector("#request-field");
+    const requestCopy = document.querySelector("#request-copy");
+
+    const CLIENT_TIMEOUT_MS = 5000;
+    const TOPIC_LABELS = {
+      delivery: "Доставка",
+      pricing: "Цены и стоимость",
+      other: "Другое",
+    };
+
+    function clearOutput() {
+      output.hidden = true;
+      output.dataset.state = "idle";
+      statusLine.textContent = "";
+      topicValue.textContent = "";
+      draftValue.textContent = "";
+      requestCopy.textContent = "";
+      topicField.hidden = true;
+      draftField.hidden = true;
+      requestField.hidden = true;
+    }
+
+    function showOutput(state, message) {
+      output.hidden = false;
+      output.dataset.state = state;
+      statusLine.textContent = message;
+    }
+
+    function showReady(topic, draft) {
+      clearOutput();
+      showOutput("ready", "Черновик готов — проверьте его и отправьте клиенту.");
+      topicValue.textContent = TOPIC_LABELS[topic] ?? topic;
+      topicField.hidden = false;
+      draftValue.textContent = draft;
+      draftField.hidden = false;
+    }
+
+    function showManualReview(reason, originalText) {
+      clearOutput();
+      showOutput("manual_review", `Требуется ручной разбор: ${reason}`);
+      requestCopy.textContent = originalText;
+      requestField.hidden = false;
+    }
+
+    async function readJson(response) {
+      const raw = await response.text();
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    }
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const reply = await fetch("/api/triage", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: document.querySelector("#message").value }),
-      });
-      result.textContent = JSON.stringify(await reply.json(), null, 2);
+      const text = textarea.value.trim();
+
+      if (!text) {
+        clearOutput();
+        showOutput("invalid_input", "Введите текст заявки — пустое поле разобрать нельзя.");
+        textarea.focus();
+        return;
+      }
+
+      clearOutput();
+      showOutput("pending", "Обрабатываю заявку…");
+      submitButton.disabled = true;
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), CLIENT_TIMEOUT_MS);
+
+      try {
+        const reply = await fetch("/api/triage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+          signal: controller.signal,
+        });
+
+        const payload = await readJson(reply);
+
+        if (!reply.ok) {
+          clearOutput();
+          if (reply.status === 400) {
+            showOutput("invalid_input", "Сервер не принял заявку: текст пустой или передан в неверном формате.");
+          } else {
+            showManualReview(`Сервер вернул ошибку ${reply.status}.`, text);
+          }
+          return;
+        }
+
+        if (!payload || payload.status === "manual_review") {
+          showManualReview("AI-модель не ответила вовремя или вернула некорректный ответ, черновик не создан.", text);
+          return;
+        }
+
+        if (payload.status === "ready") {
+          showReady(payload.topic, payload.draft);
+          return;
+        }
+
+        showManualReview(`AI-модель вернула неизвестный статус (${payload.status ?? "нет"}).`, text);
+      } catch (error) {
+        clearOutput();
+        const reason = error && error.name === "AbortError"
+          ? "Ответ сервера не пришёл вовремя."
+          : "Сервер недоступен.";
+        showManualReview(reason, text);
+      } finally {
+        clearTimeout(timer);
+        submitButton.disabled = false;
+      }
+    });
+
+    copyButton.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(draftValue.textContent);
+        copyButton.textContent = "Скопировано";
+        setTimeout(() => {
+          copyButton.textContent = "Скопировать черновик";
+        }, 2000);
+      } catch {
+        copyButton.textContent = "Не удалось скопировать — выделите текст вручную";
+      }
     });
   </script>
 </body>

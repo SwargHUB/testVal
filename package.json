@@ -1,0 +1,14 @@
+{
+  "name": "neowise-triage",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AI-помощник для входящих заявок: определение темы и черновик ответа с ручным разбором при сбоях",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test"
+  }
+}
